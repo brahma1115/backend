@@ -1,19 +1,22 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
+from django.views.decorators.csrf import csrf_exempt
 from .views import (AuthViewSet, PatientViewSet, PatientHistoryViewSet, DeviceViewSet, 
                     VitalSignViewSet, AlertViewSet, AIPredictedEventViewSet, ReportViewSet, 
                     AIChatMessageViewSet, PatientRiskViewSet, AlertSettingViewSet,
                     AnomalyViewSet, AppearanceSettingViewSet, StaffViewSet,
                     FAQViewSet, SupportTicketViewSet, DashboardViewSet, NotificationViewSet,
-                    SecuritySettingViewSet, LoginHistoryViewSet, OnboardingViewSet, MetadataViewSet)
+                    SecuritySettingViewSet, LoginHistoryViewSet, OnboardingViewSet, MetadataViewSet,
+                    UserManagementViewSet, AuditLogViewSet)
 
 router = DefaultRouter()
 router.register(r'patients', PatientViewSet, basename='patients')
+router.register(r'user-management', UserManagementViewSet, basename='user-management')
 router.register(r'patient-history', PatientHistoryViewSet, basename='patient-history')
 router.register(r'monitoring/beds', DeviceViewSet, basename='devices')
 router.register(r'monitoring/vitals', VitalSignViewSet, basename='vitals')
 router.register(r'alerts', AlertViewSet, basename='alerts')
-router.register(r'analytics', AIPredictedEventViewSet, basename='analytics')
+router.register(r'ai/predictions', AIPredictedEventViewSet, basename='ai-predictions')
 router.register(r'reports', ReportViewSet, basename='reports')
 router.register(r'ai-assistant-chat', AIChatMessageViewSet, basename='ai-assistant-chat')
 router.register(r'risk-assessment', PatientRiskViewSet, basename='risk-assessment')
@@ -29,14 +32,16 @@ router.register(r'security-settings', SecuritySettingViewSet, basename='security
 router.register(r'login-history', LoginHistoryViewSet, basename='login-history')
 router.register(r'onboarding', OnboardingViewSet, basename='onboarding')
 router.register(r'metadata', MetadataViewSet, basename='metadata')
+router.register(r'audit-logs', AuditLogViewSet, basename='audit-logs')
 
 urlpatterns = [
-    path('auth/login/', AuthViewSet.as_view({'post': 'login'}), name='api-login'),
-    path('auth/register/', AuthViewSet.as_view({'post': 'register'}), name='api-register'),
-    path('auth/forgot-password/', AuthViewSet.as_view({'post': 'forgot_password'}), name='api-forgot-password'),
-    path('auth/reset-password/', AuthViewSet.as_view({'post': 'reset_password'}), name='api-reset-password'),
-    path('auth/send-otp/', AuthViewSet.as_view({'post': 'send_otp'}), name='api-send-otp'),
-    path('auth/verify-otp/', AuthViewSet.as_view({'post': 'verify_otp'}), name='api-verify-otp'),
-    path('auth/profile/', AuthViewSet.as_view({'get': 'profile', 'put': 'profile'}), name='api-profile'),
+    path('login/', csrf_exempt(AuthViewSet.as_view({'post': 'login'})), name='api-login'),
+    path('register/', csrf_exempt(AuthViewSet.as_view({'post': 'register'})), name='api-register'),
+    path('forgot-password/', csrf_exempt(AuthViewSet.as_view({'post': 'forgot_password'})), name='api-forgot-password'),
+    path('reset-password/', csrf_exempt(AuthViewSet.as_view({'post': 'reset_password'})), name='api-reset-password'),
+    path('send-otp/', csrf_exempt(AuthViewSet.as_view({'post': 'send_otp'})), name='api-send-otp'),
+    path('verify-otp/', csrf_exempt(AuthViewSet.as_view({'post': 'verify_otp'})), name='api-verify-otp'),
+    path('login/delete_account/', csrf_exempt(AuthViewSet.as_view({'delete': 'delete_account'})), name='api-delete-account'),
+    path('profile/', csrf_exempt(AuthViewSet.as_view({'get': 'profile', 'put': 'profile'})), name='api-profile'),
     path('', include(router.urls)),
 ]

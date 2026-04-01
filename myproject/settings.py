@@ -25,9 +25,7 @@ SECRET_KEY = 'django-insecure-jl&rj-cgtel#&*j=0ivu1vws$2$(g$_*i!4*o^8r&xfm)@hfl0
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
-
-
+ALLOWED_HOSTS = ['*', '10.198.218.239', '10.0.2.2', '127.0.0.1', 'localhost', '.ngrok-free.dev', 'lubricatory-straddlingly-chandra.ngrok-free.dev','0.0.0.0']
 # Application definition
 
 INSTALLED_APPS = [
@@ -39,6 +37,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'rest_framework.authtoken',
+    'corsheaders',
     'adminastrator',
     'doctor',
     'api',
@@ -47,6 +46,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
@@ -146,3 +146,30 @@ SIMPLE_JWT = {
     "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
+
+# Email Configuration for OTP Verification
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST = 'smtp.gmail.com'
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+# Replace these with your actual email and app password
+EMAIL_HOST_USER = 'ventguard.app@gmail.com'
+EMAIL_HOST_PASSWORD = 'vtonjebnfeqfdcye'
+
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://fdcbbgdj-8000.inc1.devtunnels.ms",
+]
+
+CORS_ALLOW_ALL_ORIGINS = True # Temporary for review speed
+
+CSRF_TRUSTED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://fdcbbgdj-8000.inc1.devtunnels.ms",
+]
+
+import os
+# Allow credentials if needed
+CORS_ALLOW_CREDENTIALS = True

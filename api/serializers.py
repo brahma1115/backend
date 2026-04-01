@@ -16,10 +16,29 @@ class UserSerializer(serializers.ModelSerializer):
 class PatientSerializer(serializers.ModelSerializer):
     formatted_details = serializers.SerializerMethodField()
     formatted_bed = serializers.SerializerMethodField()
+    vitals = serializers.SerializerMethodField()
+    device_settings = serializers.SerializerMethodField()
+    is_ventilated = serializers.SerializerMethodField()
 
     class Meta:
         model = Patient
-        fields = '__all__'
+        fields = ['id', 'patient_id', 'full_name', 'dob', 'gender', 'primary_diagnosis', 'bed_number', 'attending_physician', 'admission_date', 'status', 'formatted_details', 'formatted_bed', 'vitals', 'device_settings', 'is_ventilated']
+
+    def get_is_ventilated(self, obj):
+        # A patient is considered "ventilated/monitored" if they have an assigned device
+        return hasattr(obj, 'device') and obj.device is not None
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        # Compatibility fields for React frontend
+        ret['name'] = instance.full_name
+        ret['idNum'] = instance.patient_id
+        ret['bed'] = instance.bed_number
+        ret['condition'] = instance.primary_diagnosis or "Unknown"
+        ret['diagnosis'] = instance.primary_diagnosis
+        ret['admitted'] = instance.admission_date
+        ret['physician'] = instance.attending_physician
+        return ret
 
     def get_formatted_details(self, obj):
         # "ID: P001 • 65y"
@@ -37,6 +56,29 @@ class PatientSerializer(serializers.ModelSerializer):
 
     def get_formatted_bed(self, obj):
         return f"Bed: {obj.bed_number}"
+
+    def get_vitals(self, obj):
+        latest = obj.vitals.order_by('-timestamp').first()
+        if latest:
+            return {
+                "heart_rate": latest.heart_rate,
+                "spo2": latest.spo2,
+                "respiratory_rate": latest.respiratory_rate,
+                "bp_sys": latest.blood_pressure_sys,
+                "bp_dia": latest.blood_pressure_dia
+            }
+        return None
+
+    def get_device_settings(self, obj):
+        device = getattr(obj, 'device', None)
+        if device:
+            return {
+                "mode": device.current_settings.get('mode', 'AC/VC Mode'),
+                "peep": device.current_settings.get('peep', '8.0'),
+                "fio2": device.current_settings.get('fio2', '60%'),
+                "rr": device.current_settings.get('rr', '24')
+            }
+        return None
 
 class PatientHistorySerializer(serializers.ModelSerializer):
     timestamp_display = serializers.SerializerMethodField()
@@ -140,7 +182,7 @@ from .models import Notification
 class NotificationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Notification
-        fields = '__all__'
+        fields = ['id', 'user', 'title', 'message', 'is_read', 'created_at', 'target_user_id']
 
 from .models import SecuritySetting, LoginHistory
 
@@ -167,3 +209,17 @@ class OTPSerializer(serializers.ModelSerializer):
     class Meta:
         model = OTP
         fields = '__all__'
+
+from .models import AuditLog
+
+class AuditLogSerializer(serializers.ModelSerializer):
+    user_name = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = AuditLog
+        fields = ['id', 'user', 'user_name', 'system_actor', 'action', 'details', 'icon_type', 'timestamp']
+        
+    def get_user_name(self, obj):
+        if obj.user:
+            return f"{obj.user.first_name} {obj.user.last_name}".strip() or obj.user.username
+        return obj.system_actor or "System"

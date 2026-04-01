@@ -15,6 +15,7 @@ class Profile(models.Model):
     hospital = models.CharField(max_length=200, blank=True, null=True)
     phone_number = models.CharField(max_length=20, blank=True, null=True)
     employee_id = models.CharField(max_length=50, blank=True, null=True)
+    is_approved = models.BooleanField(default=False)
 
     def __str__(self):
         return f"{self.user.username} - {self.role}"
@@ -190,11 +191,12 @@ class SupportTicket(models.Model):
         return f"Ticket #{self.id} - {self.subject} ({self.user.username})"
 
 class Notification(models.Model):
-    user = models.ForeignKey(User, related_name='notifications', on_delete=models.CASCADE)
-    title = models.CharField(max_length=200) # e.g. "Shift Handover", "System Update"
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='notifications')
+    title = models.CharField(max_length=255)
     message = models.TextField()
     is_read = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
+    target_user_id = models.IntegerField(null=True, blank=True)
 
     def __str__(self):
         return f"{self.title} for {self.user.username}"
@@ -237,3 +239,15 @@ class OTP(models.Model):
 
     def __str__(self):
         return f"OTP for {self.email} - {self.code}"
+
+class AuditLog(models.Model):
+    user = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name='audit_logs')
+    system_actor = models.CharField(max_length=100, blank=True, null=True) # e.g., "System"
+    action = models.CharField(max_length=255) # e.g. "Changed Ventilator Settings"
+    details = models.CharField(max_length=255, blank=True, null=True) # e.g. "Patient John Smith"
+    icon_type = models.CharField(max_length=50, default="system") # "user", "admin", "warning", "system"
+    timestamp = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        actor = self.user.username if self.user else self.system_actor
+        return f"{actor}: {self.action}"

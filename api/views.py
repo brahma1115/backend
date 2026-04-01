@@ -1,43 +1,54 @@
+import random
+import datetime
+from django.utils import timezone
+from django.db.models import Q
+from dateutil.parser import parse
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.exceptions import PermissionDenied
 from django.contrib.auth.models import User
 from django.contrib.auth import authenticate
 from rest_framework.authtoken.models import Token 
 from .models import (Profile, Patient, PatientHistory, Device, VitalSign, Alert, 
-                     AIPredictedEvent, Report, SecuritySetting, LoginHistory, OnboardingStep, OTP) 
+                     AIPredictedEvent, Report, SecuritySetting, LoginHistory, OnboardingStep, OTP, Notification, AuditLog) 
 from .serializers import (UserSerializer, PatientSerializer, PatientHistorySerializer, 
                           DeviceSerializer, VitalSignSerializer, AlertSerializer, 
                           AIPredictedEventSerializer, ReportSerializer, 
-                          SecuritySettingSerializer, LoginHistorySerializer, OnboardingStepSerializer, OTPSerializer)
+                          SecuritySettingSerializer, LoginHistorySerializer, OnboardingStepSerializer, OTPSerializer, AuditLogSerializer)
 
 from rest_framework_simplejwt.tokens import RefreshToken
-from django.contrib.auth import authenticate
-from rest_framework.response import Response
-from rest_framework import status
 
 class AuthViewSet(viewsets.ViewSet):
     permission_classes = [AllowAny]
 
     @action(detail=False, methods=['post'])
     def login(self, request):
-
-        email = request.data.get("email")
-        username = request.data.get("username")
+        identifier = request.data.get("email") or request.data.get("username")
         password = request.data.get("password")
 
-        # login using email
-        if email:
-            try:
-                user_obj = User.objects.get(email=email)
-                username = user_obj.username
-            except User.DoesNotExist:
-                return Response({"error": "Invalid credentials"}, status=401)
+        if not identifier or not password:
+            return Response({"error": "Email/Username and password are required"}, status=400)
 
-        user = authenticate(username=username, password=password)
+        # Single-pass optimized lookup for Email, Username, or Phone
+        user_obj = User.objects.filter(
+            Q(email=identifier) | 
+            Q(username=identifier) | 
+            Q(profile__phone_number=identifier)
+        ).select_related('profile').first()
+        
+        if not user_obj:
+            return Response({"error": "Invalid credentials"}, status=401)
+
+        user = authenticate(username=user_obj.username, password=password)
 
         if user:
+            # Check if user is approved by Admin
+            profile = getattr(user, 'profile', None)
+            if profile and not profile.is_approved and profile.role != 'adminastrator':
+                return Response({"error": "Your account is pending administrator approval."}, status=status.HTTP_403_FORBIDDEN)
+
             refresh = RefreshToken.for_user(user)
 
             return Response({
@@ -50,14 +61,23 @@ class AuthViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=['post'], permission_classes=[IsAuthenticated])
     def logout(self, request):
-        request.user.auth_token.delete()
+        # Handle logout by deleting individual token if needed (though JWT is stateless)
+        # Using SimpleJWT, we don't necessarily delete tokens on server, 
+        # but for this prototype we'll just return success.
         return Response({"message": "Successfully logged out"}, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['DELETE'], permission_classes=[IsAuthenticated])
+    def delete_account(self, request):
+        user = request.user
+        user.delete() # Cascades to profile and other related data
+        return Response({"message": "Account deleted successfully"}, status=status.HTTP_200_OK)
         
     @action(detail=False, methods=['post'])
     def register(self, request):
         email = request.data.get("email", "")
         password = request.data.get("password")
         full_name = request.data.get("full_name", "")
+        phone = request.data.get("phone", "")
         role = request.data.get("role", "nurse") # default to nurse if not provided
         
         # In a real app we'd validate the confirm_password here too if sent from UI
@@ -90,6 +110,7 @@ class AuthViewSet(viewsets.ViewSet):
         # Map Android UI Role string to backend role code
         role_map = {
             "Doctor": "doctor",
+            "Doctor / Physician": "doctor",
             "Nurse": "nurse",
             "Respiratory Therapist": "respiratory_therapist",
             "Administrator": "adminastrator" 
@@ -97,14 +118,21 @@ class AuthViewSet(viewsets.ViewSet):
         
         backend_role = role_map.get(role, role.lower().replace(" ", "_"))
 
-        Profile.objects.create(user=user, role=backend_role)
+        Profile.objects.create(user=user, role=backend_role, phone_number=phone, is_approved=False)
         
-        token, created = Token.objects.get_or_create(user=user)
-        
+        # Notify Admin about new signup
+        admin = User.objects.filter(profile__role='adminastrator').first()
+        if admin:
+            Notification.objects.create(
+                user=admin,   
+                title="New User Signup",
+                message=f"{full_name} has requested access as a {role}.",
+                target_user_id=user.id
+            )
+
         return Response({
-            "message": "User created successfully",
-            "token": token.key, 
-            "user": UserSerializer(user).data
+            "message": "Registration successful. Please wait for administrator approval.",
+            "is_pending": True
         }, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=['post'])
@@ -112,20 +140,51 @@ class AuthViewSet(viewsets.ViewSet):
         email = request.data.get("email")
         if not email:
             return Response({"error": "Email is required"}, status=status.HTTP_400_BAD_REQUEST)
+            
+        if not User.objects.filter(email=email).exists():
+            return Response({"error": "No account found with this email"}, status=status.HTTP_404_NOT_FOUND)
         
-        # In a real app, generate a random 6-digit code and send via email
-        # For prototype, we'll use a fixed code or random and return it for testing
-        import random
+        # Prototype: generate a random 6-digit code
         code = str(random.randint(100000, 999999))
         
         OTP.objects.create(email=email, code=code)
         
-        # Mocking email send
-        print(f"OTP for {email}: {code}")
-        
+        # --- IMPORTANT FOR TESTING ---
+        # Print clearly to the Django terminal so the user can easily find it
+        setup_warning = ""
+        try:
+            from django.core.mail import send_mail
+            from django.conf import settings
+            
+            # Check if user has updated the placeholder password
+            if getattr(settings, 'EMAIL_HOST_PASSWORD', '') == 'your_app_password':
+                setup_warning = " (NOTE: Email not sent. You must update EMAIL_HOST_PASSWORD in settings.py with a real App Password. For now, use the OTP below.)"
+                print("\n" + "="*50)
+                print(f"[{timezone.now()}] OTP FOR {email}: {code}")
+                print("="*50 + "\n")
+            else:
+                subject = 'Your Password Reset OTP'
+                message = f'Your One-Time Password (OTP) for password reset is: {code}\n\nThis OTP is valid for 5 minutes.'
+                actual_email = getattr(settings, 'EMAIL_HOST_USER', 'noreply@example.com')
+                email_from = f'VentGuard App <{actual_email}>'
+                recipient_list = [email]
+                
+                send_mail(subject, message, email_from, recipient_list, fail_silently=False)
+                print(f"OTP email sent to {email}: {code}")
+                
+        except Exception as e:
+            setup_warning = f" (NOTE: Email failed. Check settings.py. Error: {str(e)[:30]})"
+            print("\n" + "="*50)
+            print(f"[{timezone.now()}] OTP FOR {email}: {code}")
+            print(f"Email Error: {str(e)}")
+            print("="*50 + "\n")
+
+        # For the prototype, we include the code in the response to make testing easier 
+        # for the user if they can't set up the email server.
+        # IN PRODUCTION: Remove "code" from this JSOn response!
         return Response({
-            "message": f"OTP sent to {email}",
-            "code": code # In production, DO NOT return the code in the response
+            "message": f"OTP generated for {email}{setup_warning}",
+            "code": code 
         })
 
     @action(detail=False, methods=['post'])
@@ -139,8 +198,6 @@ class AuthViewSet(viewsets.ViewSet):
         otp_obj = OTP.objects.filter(email=email, code=code).order_by('-created_at').first()
         
         if otp_obj:
-            from django.utils import timezone
-            import datetime
             # Check if expired (e.g., 5 minutes)
             if otp_obj.created_at < timezone.now() - datetime.timedelta(minutes=5):
                 return Response({"error": "OTP expired"}, status=status.HTTP_400_BAD_REQUEST)
@@ -260,6 +317,61 @@ class AuthViewSet(viewsets.ViewSet):
 class PatientViewSet(viewsets.ModelViewSet):
     queryset = Patient.objects.all()
     serializer_class = PatientSerializer
+
+    def perform_create(self, serializer):
+        patient = serializer.save()
+        # Notify Admin
+        admin = User.objects.filter(profile__role='adminastrator').first()
+        recorded_by = self.request.user if self.request.user.is_authenticated else User.objects.first()
+        if admin:
+            Notification.objects.create(
+                user=admin,
+                title="New Patient Added",
+                message=f"{recorded_by.first_name or recorded_by.username} added patient: {patient.full_name}"
+            )
+
+    def perform_update(self, serializer):
+        patient = serializer.save()
+        # Notify Admin
+        admin = User.objects.filter(profile__role='adminastrator').first()
+        recorded_by = self.request.user if self.request.user.is_authenticated else User.objects.first()
+        if admin:
+            Notification.objects.create(
+                user=admin,
+                title="Patient Details Updated",
+                message=f"{recorded_by.first_name or recorded_by.username} updated details for: {patient.full_name}"
+            )
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        patient_name = instance.full_name
+        user = request.user if request.user.is_authenticated else None
+        
+        # Perform deletion
+        response = super().destroy(request, *args, **kwargs)
+        
+        # Notify Administrators
+        admins = User.objects.filter(profile__role='adminastrator')
+        actor_name = "Someone"
+        if user:
+             actor_name = f"{user.first_name} {user.last_name}".strip() or user.username
+        
+        for admin in admins:
+            Notification.objects.create(
+                user=admin,
+                title="Patient Record Deleted",
+                message=f"{actor_name} permanently deleted the record for patient {patient_name}."
+            )
+            
+        # Global Audit Log
+        AuditLog.objects.create(
+            user=user,
+            action="Deleted Patient Record",
+            details=f"Patient {patient_name}",
+            icon_type="warning"
+        )
+        
+        return response
 
     @action(detail=False, methods=['get'])
     def monitor_list(self, request):
@@ -384,19 +496,29 @@ class PatientViewSet(viewsets.ModelViewSet):
                 except: pass
                 
             if status_filter and status_filter != 'All':
-                if status_filter == 'Stable' and status_calc != 'Normal':
-                    continue
-                if status_filter != 'Stable' and status_calc != status_filter:
+                target_status = 'Normal' if status_filter == 'Stable' else status_filter
+                if status_calc != target_status:
                     continue
 
             patient_list_data.append({
                 "id": patient.id,
+                "full_name": patient.full_name,
                 "name": patient.full_name,
                 "patient_id": patient.patient_id,
+                "idNum": patient.patient_id,
                 "age": age,
+                "gender": patient.gender,
                 "bed_number": patient.bed_number,
-                "status": status_calc,
-                "condition": patient.primary_diagnosis or "Unknown"
+                "bed": patient.bed_number,
+                "status": status_calc if status_calc != 'Normal' else (patient.status if patient.status != 'Admitted' else 'Stable'),
+                "diagnosis": patient.primary_diagnosis,
+                "condition": patient.primary_diagnosis or "Unknown",
+                "admission_date": patient.admission_date,
+                "admitted": patient.admission_date,
+                "attending_physician": patient.attending_physician,
+                "physician": patient.attending_physician,
+                "formatted_details": f"ID: {patient.patient_id} • {age}",
+                "formatted_bed": f"Bed: {patient.bed_number}",
             })
             
         return Response(patient_list_data)
@@ -472,6 +594,18 @@ class DeviceViewSet(viewsets.ModelViewSet):
         
         device.current_settings.update(new_settings)
         device.save()
+
+        # Notify Admin
+        if device.assigned_patient:
+            admin = User.objects.filter(profile__role='adminastrator').first()
+            recorded_by = request.user if request.user.is_authenticated else User.objects.first()
+            setting_name = list(new_settings.keys())[0] if new_settings else "settings"
+            if admin:
+                Notification.objects.create(
+                    user=admin,
+                    title="Ventilator Settings Changed",
+                    message=f"{recorded_by.first_name or recorded_by.username} changed {setting_name} for {device.assigned_patient.full_name}"
+                )
         
         # Log to PatientHistory as per UI requirement ("All changes are logged")
         if device.assigned_patient:
@@ -482,6 +616,14 @@ class DeviceViewSet(viewsets.ModelViewSet):
                 event_title='Ventilator Settings Updated',
                 event_description=f"Clinical adjustments: {setting_str}",
                 recorded_by=request.user if request.user.is_authenticated else User.objects.first()
+            )
+            
+            # Global Audit Log
+            AuditLog.objects.create(
+                user=request.user if request.user.is_authenticated else User.objects.first(),
+                action="Changed Ventilator Settings",
+                details=f"Patient {device.assigned_patient.full_name}",
+                icon_type="system"
             )
             
         return Response({
@@ -502,8 +644,6 @@ class VitalSignViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(patient_id=patient_id)
             
         if time_range:
-            from django.utils import timezone
-            import datetime
             now = timezone.now()
             if time_range == '4h':
                 queryset = queryset.filter(timestamp__gte=now - datetime.timedelta(hours=4))
@@ -573,8 +713,6 @@ class AlertViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def summary(self, request):
-        from django.utils import timezone
-        import datetime
         
         now = timezone.now()
         today = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -693,7 +831,6 @@ class ReportViewSet(viewsets.ModelViewSet):
             uploaded_at_str = item.get('uploaded_at')
             date_str = ""
             if uploaded_at_str:
-                from dateutil.parser import parse
                 try:
                     dt = parse(uploaded_at_str)
                     date_str = dt.strftime("%b %d, %Y")
@@ -736,25 +873,76 @@ class AIChatMessageViewSet(viewsets.ModelViewSet):
             message=message_text
         )
         
-        # Generate mock AI response based on the frontend layout
-        ai_response_text = "Based on the patient's current waveform data and history, here is my analysis."
-        if "peep" in message_text.lower():
-            ai_response_text = "I recommend maintaining current PEEP at 8.0 cmH2O. Increasing PEEP may exacerbate the peak pressure issue."
+        # Smarter AI Logic for VentGuard Prototype
+        text_lower = message_text.lower()
+        
+        confidence = 85
+        causes = []
+        actions = []
+        
+        if "pressure" in text_lower or "pip" in text_lower:
+            ai_response_text = "High peak pressure detected. This often indicates increased airway resistance or decreased lung compliance."
             confidence = 92
-            causes = []
-            actions = []
-        else:
-            confidence = 85
             causes = [
                 {"cause": "Secretions/Mucus Plug", "probability": "85%"},
-                {"cause": "Patient Agitation", "probability": "60%"},
-                {"cause": "Tube Kinking", "probability": "45%"}
+                {"cause": "Patient Agitation/Coughing", "probability": "70%"},
+                {"cause": "Tube Kinking", "probability": "60%"}
             ]
             actions = [
                 "Suction the airway to clear secretions",
                 "Check sedation levels (RASS score)",
-                "Verify tube positioning"
+                "Verify ETT (Endotracheal Tube) positioning"
             ]
+        elif "peep" in text_lower:
+            ai_response_text = "I recommend maintaining current PEEP at 8.0 cmH2O. Increasing PEEP may exacerbate the peak pressure issue without improving oxygenation given the current compliance."
+            confidence = 88
+            causes = []
+            actions = [
+                "Monitor oxygenation (SpO2)",
+                "Consider lung recruitment maneuver if PaO2 drops"
+            ]
+        elif "volume" in text_lower or "tidal" in text_lower or "vte" in text_lower:
+            ai_response_text = "Low tidal volume observed. This could be due to a leak in the circuit or sudden changes in patient lung conditions."
+            confidence = 89
+            causes = [
+                {"cause": "Circuit Leak", "probability": "80%"},
+                {"cause": "Cuff Deflation", "probability": "65%"},
+                {"cause": "Worsening Compliance", "probability": "50%"}
+            ]
+            actions = [
+                "Check ventilator circuit for obvious leaks",
+                "Check ETT cuff pressure",
+                "Review pressure-volume loops"
+            ]
+        elif "oxygen" in text_lower or "spo2" in text_lower or "fio2" in text_lower:
+            ai_response_text = "Desaturation noted. Before increasing FiO2, consider checking airway patency."
+            confidence = 94
+            causes = [
+                {"cause": "Mucus Plugging", "probability": "75%"},
+                {"cause": "Loss of PEEP", "probability": "60%"},
+                {"cause": "Ventilator Asynchrony", "probability": "55%"}
+            ]
+            actions = [
+                "Briefly increase FiO2 to 100% (100% O2 suction mode)",
+                "Suction patient if secretions suspected",
+                "Assess for signs of pneumothorax if sudden"
+            ]
+        elif "rate" in text_lower or "rr" in text_lower or "breath" in text_lower:
+            ai_response_text = "High respiratory rate (tachypnea) detected. This may indicate patient distress or pain."
+            confidence = 82
+            causes = [
+                {"cause": "Pain/Agitation", "probability": "80%"},
+                {"cause": "Hypoxia or Hypercapnia", "probability": "75%"},
+                {"cause": "Fever/Sepsis", "probability": "40%"}
+            ]
+            actions = [
+                "Evaluate patient for pain and administer analgesia if needed",
+                "Check recent ABG results",
+                "Examine flow-time curve for double-triggering or auto-PEEP"
+            ]
+        else:
+            ai_response_text = "Based on the input and current ventilator parameters, the patient appears relatively stable, but continuous monitoring is advised. Could you provide more specific symptoms or parameters (like pressure, volume, or SpO2)?"
+            confidence = 75
 
         # Save AI message
         ai_msg = AIChatMessage.objects.create(
@@ -834,8 +1022,6 @@ class AnomalyViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def summary(self, request):
-        from django.utils import timezone
-        import datetime
         
         now = timezone.now()
         today = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -909,15 +1095,14 @@ class DashboardViewSet(viewsets.ViewSet):
     """
     Aggregation endpoint for Home screen (activity_home.xml)
     """
-    @action(detail=False, methods=['get'])
-    def summary(self, request):
+    def list(self, request):
         from .models import Patient, Device, Alert, Profile, AIPredictedEvent, PatientRisk, Anomaly
         
-        # Stats
-        active_patients = Patient.objects.filter(status__icontains="Admit").count() or Patient.objects.count()
-        active_vents = Device.objects.filter(status__icontains="Active", device_type__icontains="Vent").count() or Device.objects.count()
+        # Stats (Raw counts for real-time accuracy)
+        active_patients = Patient.objects.count()
+        active_vents = Patient.objects.filter(bed_number__icontains="ICU").count()
         active_alerts = Alert.objects.filter(status="Active").count()
-        staff_online = Profile.objects.filter(role__in=['doctor', 'nurse', 'respiratory_therapist']).count() # Mock online
+        staff_online = Profile.objects.count()
 
         # AI Insights
         predictive_alerts_count = AIPredictedEvent.objects.count()
@@ -1006,3 +1191,152 @@ class MetadataViewSet(viewsets.ViewSet):
             "genders": ["Male", "Female", "Other"],
             "patient_statuses": ["Stabilized", "Critical", "Observation", "Ready for Discharge"]
         })
+
+class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = AuditLog.objects.all().order_by('-timestamp')
+    serializer_class = AuditLogSerializer
+
+class UserManagementViewSet(viewsets.ViewSet):
+    permission_classes = [IsAuthenticated]
+
+    def check_admin(self, request):
+        if not hasattr(request.user, 'profile') or request.user.profile.role != 'adminastrator':
+            raise PermissionDenied("Only administrators can perform this action.")
+
+    @action(detail=False, methods=['get'])
+    def list_users(self, request):
+        self.check_admin(request)
+        
+        users = User.objects.all().order_by('-date_joined')
+        role_filter = request.query_params.get('role')
+        if role_filter and role_filter != 'All':
+            role_map = {
+                "Doctors": "doctor",
+                "Nurses": "nurse",
+                "RTs": "respiratory_therapist",
+                "Admins": "adminastrator"
+            }
+            backend_role = role_map.get(role_filter)
+            if backend_role:
+                users = users.filter(profile__role=backend_role)
+        
+        data = []
+        for user in users:
+            profile = getattr(user, 'profile', None)
+            data.append({
+                "id": user.id,
+                "full_name": f"{user.first_name} {user.last_name}".strip() or user.username,
+                "role": profile.role if profile else "Unknown",
+                "role_display": profile.get_role_display() if profile else "Unknown",
+                "department": profile.department if profile else "",
+                "status": "Approved" if (profile and profile.is_approved) else "Pending",
+                "is_approved": profile.is_approved if profile else False
+            })
+        return Response(data)
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        self.check_admin(request)
+        try:
+            target_user = User.objects.get(id=pk)
+            profile = target_user.profile
+            profile.is_approved = True
+            profile.save()
+            
+            Notification.objects.create(
+                user=target_user,
+                title="Account Approved",
+                message="Your account has been approved by the administrator. You can now access the dashboard."
+            )
+            
+            # Mark signup notification as read
+            Notification.objects.filter(
+                target_user_id=pk, 
+                title="New User Signup"
+            ).update(is_read=True)
+            
+            # Global Audit Log
+            AuditLog.objects.create(
+                user=request.user if request.user.is_authenticated else None,
+                system_actor="System" if not request.user.is_authenticated else None,
+                action="Approved User",
+                details=target_user.username,
+                icon_type="user"
+            )
+            
+            return Response({"status": "User approved successfully"})
+        except (User.DoesNotExist, Profile.DoesNotExist):
+            return Response({"error": "User not found"}, status=404)
+
+    @action(detail=True, methods=['post'])
+    def deactivate(self, request, pk=None):
+        self.check_admin(request)
+        try:
+            target_user = User.objects.get(id=pk)
+            profile = target_user.profile
+            profile.is_approved = False
+            profile.save()
+            
+            return Response({"status": "User deactivated successfully"})
+        except (User.DoesNotExist, Profile.DoesNotExist):
+            return Response({"error": "User not found"}, status=404)
+
+    @action(detail=True, methods=['delete'])
+    def delete_user(self, request, pk=None):
+        self.check_admin(request)
+        try:
+            target_user = User.objects.get(id=pk)
+            # The profile is deleted automatically because of the models.CASCADE relationship on OneToOneField
+            target_user.delete()
+            return Response({"status": "User deleted successfully"})
+        except User.DoesNotExist:
+            return Response({"error": "User not found"}, status=404)
+
+    @action(detail=True, methods=['post'])
+    def make_admin(self, request, pk=None):
+        self.check_admin(request)
+        try:
+            target_user = User.objects.get(id=pk)
+            profile = target_user.profile
+            profile.role = 'adminastrator'
+            profile.is_approved = True
+            profile.save()
+            
+            # Global Audit Log
+            AuditLog.objects.create(
+                user=request.user if request.user.is_authenticated else None,
+                system_actor="System" if not request.user.is_authenticated else None,
+                action="Promoted to Admin",
+                details=target_user.username,
+                icon_type="admin"
+            )
+            
+            return Response({"status": "User promoted to Admin successfully"})
+        except (User.DoesNotExist, Profile.DoesNotExist):
+            return Response({"error": "User not found"}, status=404)
+
+    @action(detail=True, methods=['post'])
+    def dismiss_admin(self, request, pk=None):
+        self.check_admin(request)
+        try:
+            target_user = User.objects.get(id=pk)
+            # Prevent demoting yourself
+            if target_user == request.user:
+                return Response({"error": "You cannot demote yourself from Admin status."}, status=400)
+                
+            profile = target_user.profile
+            profile.role = 'doctor' # Default role after dismissal
+            profile.save()
+            
+            # Global Audit Log
+            AuditLog.objects.create(
+                user=request.user if request.user.is_authenticated else None,
+                system_actor="System" if not request.user.is_authenticated else None,
+                action="Dismissed Admin",
+                details=target_user.username,
+                icon_type="warning"
+            )
+            
+            return Response({"status": "User dismissed as Admin successfully"})
+        except (User.DoesNotExist, Profile.DoesNotExist):
+            return Response({"error": "User not found"}, status=404)
