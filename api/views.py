@@ -166,24 +166,25 @@ class AuthViewSet(viewsets.ViewSet):
                 subject = 'Your Password Reset OTP'
                 message = f'Your One-Time Password (OTP) for password reset is: {code}\n\nThis OTP is valid for 5 minutes.'
                 actual_email = getattr(settings, 'EMAIL_HOST_USER', 'noreply@example.com')
-                email_from = f'VentGuard App <{actual_email}>'
+                email_from = actual_email 
                 recipient_list = [email]
                 
                 send_mail(subject, message, email_from, recipient_list, fail_silently=False)
                 print(f"OTP email sent to {email}: {code}")
                 
         except Exception as e:
-            setup_warning = f" (NOTE: Email failed. Check settings.py. Error: {str(e)[:30]})"
-            print("\n" + "="*50)
-            print(f"[{timezone.now()}] OTP FOR {email}: {code}")
-            print(f"Email Error: {str(e)}")
-            print("="*50 + "\n")
+            setup_warning = f" (NOTE: Email failed. Error code: {str(e)[:20]})"
+            print(f"\n[{timezone.now()}] ERROR SENDING OTP TO {email}: {str(e)}\n")
 
         # For the prototype, we include the code in the response to make testing easier 
         # for the user if they can't set up the email server.
-        # IN PRODUCTION: Remove "code" from this JSOn response!
+        # IN PRODUCTION: Remove "code" from this JSON response!
+        msg = f"OTP sent to {email}"
+        if setup_warning:
+            msg = f"OTP generated. {setup_warning}"
+
         return Response({
-            "message": f"OTP generated for {email}{setup_warning}",
+            "message": msg,
             "code": code 
         })
 
